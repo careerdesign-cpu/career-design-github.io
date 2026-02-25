@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>PDF Viewer</title>
   <style>
-    /* 스크롤바(드래그바) 숨김 */
     * { scrollbar-width: none; }
     *::-webkit-scrollbar { width: 0; height: 0; }
 
@@ -15,7 +14,7 @@
       background:#0b1220;
       color:#e5e7eb;
       font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;
-      overflow:hidden; /* body 스크롤 차단 */
+      overflow:hidden;
     }
 
     .topbar{
@@ -42,7 +41,6 @@
       overflow:auto; padding:10px; box-sizing:border-box;
     }
 
-    /* 썸네일 */
     .thumb-wrap{
       width:100%;
       margin-bottom:10px;
@@ -89,7 +87,6 @@
       border-radius:12px;
     }
 
-    /* 슬라이드 애니메이션(캔버스 2장) */
     .stage{
       position:relative;
       border-radius:12px;
@@ -110,10 +107,9 @@
       border-radius:0;
       background:transparent;
       transform:translateX(0);
-      pointer-events:none; /* ✅ 캔버스가 클릭 잡아먹지 않게 */
+      pointer-events:none;
     }
 
-    /* ✅ 화면을 반으로 나누는 클릭 영역 */
     .tap-zone{
       position:absolute; top:0; bottom:0;
       width:50%;
@@ -124,7 +120,6 @@
     .tap-zone.left{ left:0; }
     .tap-zone.right{ right:0; }
 
-    /* 좌/우 UI 버튼(원하면 숨겨도 됨) */
     .nav-zone{
       position:absolute;
       top:0; bottom:0;
@@ -187,8 +182,13 @@
       <span id="pageCount">/ ?</span>
     </div>
     <button class="btn" id="next">▶</button>
+
     <button class="btn" id="zoomOut">－</button>
     <button class="btn" id="zoomIn">＋</button>
+
+    <!-- ✅ Fit 버튼 추가 -->
+    <button class="btn" id="fit">화면맞춤</button>
+
     <div class="spacer"></div>
     <button class="btn" id="openPdf">PDF 직접열기</button>
   </div>
@@ -209,7 +209,6 @@
           <canvas id="canvasA"></canvas>
           <canvas id="canvasB"></canvas>
 
-          <!-- ✅ 스테이지를 좌/우 반으로 분할 클릭 -->
           <div class="tap-zone left" id="tapLeft" title="이전"></div>
           <div class="tap-zone right" id="tapRight" title="다음"></div>
         </div>
@@ -237,10 +236,13 @@
 
     let pdfDoc      = null;
     let currentPage = 1;
-    let scale       = 1.2;
+
+    // ✅ 기본값 크게 시작하지 말고, 로딩 시 fit으로 계산해서 넣음
+    let scale       = 1.0;
+    let fitMode     = true; // 화면맞춤 모드(리사이즈 시 재적용)
 
     let busy = false;
-    let pendingTarget = null; // 마지막으로 원하는 페이지(연타해도 마지막만)
+    let pendingTarget = null;
 
     const SLIDE_MS = 190;
 
@@ -254,14 +256,13 @@
     const ctxA = canvasA.getContext("2d", { alpha:false });
     const ctxB = canvasB.getContext("2d", { alpha:false });
 
-    let front = "A"; // 처음엔 A가 front
+    let front = "A";
 
     const frontCanvas = () => (front === "A" ? canvasA : canvasB);
     const backCanvas  = () => (front === "A" ? canvasB : canvasA);
     const frontCtx    = () => (front === "A" ? ctxA : ctxB);
     const backCtx     = () => (front === "A" ? ctxB : ctxA);
 
-    // 썸네일 lazy
     const thumbCache = new Map();
     let thumbObserver = null;
     const THUMB_TARGET_W = 160;
@@ -272,13 +273,12 @@
     }
 
     function setLayersIdle(){
-      // ✅ 빈 캔버스가 위에 덮지 않도록 z-index 관리 + back는 화면 밖으로 빼기
       const f = frontCanvas();
       const b = backCanvas();
       f.style.zIndex = 2;
       b.style.zIndex = 1;
       f.style.transform = "translateX(0)";
-      b.style.transform = "translateX(120%)"; // 화면 밖
+      b.style.transform = "translateX(120%)";
       f.style.transition = "none";
       b.style.transition = "none";
     }
@@ -291,6 +291,28 @@
       sidebar.querySelectorAll(".thumb-wrap").forEach((el, i) => {
         el.classList.toggle("active", i + 1 === currentPage);
       });
+    }
+
+    // ✅ viewer 영역 기준으로 "화면맞춤" scale 계산
+    async function computeFitScale(pageNum){
+      const page = await pdfDoc.getPage(pageNum);
+
+      // scale=1 기준 PDF 원본 크기
+      const v1 = page.getViewport({ scale: 1 });
+
+      // viewer padding(16px*2) + stage border 등을 감안해서 여유값
+      const PADDING = 32;
+      const EXTRA   = 24; // border/그림자 등 여유
+
+      const availW = Math.max(200, viewer.clientWidth  - PADDING - EXTRA);
+      const availH = Math.max(200, viewer.clientHeight - PADDING - EXTRA);
+
+      const sW = availW / v1.width;
+      const sH = availH / v1.height;
+
+      // "너무 작게" or "너무 크게" 방지
+      const s = Math.min(sW, sH);
+      return Math.max(0.6, Math.min(2.0, s));
     }
 
     async function renderTo(pageNum, targetCanvas, targetCtx) {
@@ -311,14 +333,12 @@
 
     function animateSlide(direction){
       return new Promise((resolve) => {
-        // next: 오른쪽에서 들어오고, prev: 왼쪽에서 들어옴
         const inFrom = (direction === "next") ? 1 : -1;
         const outTo  = -inFrom;
 
         const f = frontCanvas();
         const b = backCanvas();
 
-        // ✅ 애니중에는 incoming(back)을 위로
         f.style.zIndex = 2;
         b.style.zIndex = 3;
 
@@ -347,10 +367,7 @@
       targetPage = clampPage(targetPage);
       if (targetPage === currentPage) return;
 
-      if (busy) {
-        pendingTarget = targetPage; // 연타 시 마지막 목표만 저장
-        return;
-      }
+      if (busy) { pendingTarget = targetPage; return; }
 
       busy = true;
       overlay.classList.remove("hidden");
@@ -358,20 +375,19 @@
       try {
         const direction = (targetPage > currentPage) ? "next" : "prev";
 
-        // back에 미리 렌더
+        // ✅ fitMode면 페이지 전환 시에도 화면맞춤 스케일 유지(페이지 비율이 다른 PDF 대비)
+        if (fitMode) scale = await computeFitScale(targetPage);
+
         await renderTo(targetPage, backCanvas(), backCtx());
 
-        // 오버레이 숨기고 슬라이드
         overlay.classList.add("hidden");
         await animateSlide(direction);
 
-        // swap
         front = (front === "A") ? "B" : "A";
         currentPage = targetPage;
 
         setLayersIdle();
         setNavUI();
-
         viewer.scrollTop = 0;
 
       } catch (e) {
@@ -447,6 +463,15 @@
       }
     }
 
+    async function applyFitAndRerender() {
+      if (!pdfDoc || busy) return;
+      overlay.classList.remove("hidden");
+      scale = await computeFitScale(currentPage);
+      await renderTo(currentPage, frontCanvas(), frontCtx());
+      setLayersIdle();
+      overlay.classList.add("hidden");
+    }
+
     async function loadPdf() {
       try {
         pdfDoc = await pdfjsLib.getDocument({
@@ -460,13 +485,13 @@
 
         overlay.classList.remove("hidden");
 
-        // ✅ 첫 페이지를 front에 렌더
+        // ✅ 첫 렌더링은 "화면맞춤"
+        scale = await computeFitScale(1);
+
         await renderTo(1, frontCanvas(), frontCtx());
         currentPage = 1;
 
-        // ✅ back 캔버스가 위에 덮지 않도록 즉시 정리
         setLayersIdle();
-
         overlay.classList.add("hidden");
         setNavUI();
 
@@ -483,13 +508,13 @@
       }
     }
 
-    // 상단 버튼
     $("prev").addEventListener("click", (e) => { e.stopPropagation(); goPrev(); });
     $("next").addEventListener("click", (e) => { e.stopPropagation(); goNext(); });
 
     $("zoomIn").addEventListener("click", async (e) => {
       e.stopPropagation();
       if (!pdfDoc || busy) return;
+      fitMode = false; // 수동 줌하면 fit 해제
       scale = Math.min(3.0, scale + 0.15);
       overlay.classList.remove("hidden");
       await renderTo(currentPage, frontCanvas(), frontCtx());
@@ -500,11 +525,19 @@
     $("zoomOut").addEventListener("click", async (e) => {
       e.stopPropagation();
       if (!pdfDoc || busy) return;
+      fitMode = false; // 수동 줌하면 fit 해제
       scale = Math.max(0.6, scale - 0.15);
       overlay.classList.remove("hidden");
       await renderTo(currentPage, frontCanvas(), frontCtx());
       setLayersIdle();
       overlay.classList.add("hidden");
+    });
+
+    // ✅ 화면맞춤 버튼
+    $("fit").addEventListener("click", async (e) => {
+      e.stopPropagation();
+      fitMode = true;
+      await applyFitAndRerender();
     });
 
     $("page").addEventListener("keydown", (e) => {
@@ -518,15 +551,12 @@
       window.open(PDF_URL, "_blank");
     });
 
-    // 좌/우 UI 버튼
     $("navLeft").addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); goPrev(); });
     $("navRight").addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); goNext(); });
 
-    // ✅ 스테이지 좌/우 반 클릭(빈 화면 포함 전체 영역)
     $("tapLeft").addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); goPrev(); });
     $("tapRight").addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); goNext(); });
 
-    // ✅ 키보드 컨트롤(스크롤 완전 방지)
     document.addEventListener("keydown", (e) => {
       if (!pdfDoc) return;
 
@@ -546,6 +576,15 @@
       if (!isTyping && e.key === "ArrowRight") { e.preventDefault(); goNext(); return; }
       if (!isTyping && e.key === "ArrowLeft")  { e.preventDefault(); goPrev(); return; }
     }, { capture:true, passive:false });
+
+    // ✅ 창 크기 바뀌면(PC/모바일 회전 포함) fitMode일 때 다시 맞춤
+    window.addEventListener("resize", () => {
+      if (!pdfDoc) return;
+      if (!fitMode) return;
+      // 너무 자주 호출되는 것 방지(간단 디바운스)
+      clearTimeout(window.__fitTimer);
+      window.__fitTimer = setTimeout(() => applyFitAndRerender(), 120);
+    });
 
     loadPdf();
   </script>
